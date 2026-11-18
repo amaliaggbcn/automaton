@@ -28,8 +28,8 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
   // ─── 1. Chain selection + wallet ──────────────────────────────
   console.log(chalk.cyan("  [1/6] Chain selection & identity (wallet)..."));
   let selectedChain: ChainType = "evm";
-  const chainInput = await promptOptional("Chain type (evm or solana) [evm]");
-  if (chainInput && chainInput.toLowerCase() === "solana") {
+  const chainInput = process.env.AUTOMATON_CHAIN || "evm";
+  if (chainInput.toLowerCase() === "solana") {
     selectedChain = "solana";
     console.log(chalk.green("  Chain: Solana (Ed25519)\n"));
   } else {
@@ -80,39 +80,22 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     console.log(chalk.yellow("  No API key set. The automaton will have limited functionality.\n"));
   }
 
-  // ─── 3. Interactive questions ─────────────────────────────────
+  // ─── 3. Interactive questions (Automated for headless) ────────
   console.log(chalk.cyan("  [3/6] Setup questions\n"));
 
-  const name = await promptRequired("What do you want to name your automaton?");
+  const name = process.env.AUTOMATON_NAME || "Automaton";
   console.log(chalk.green(`  Name: ${name}\n`));
 
-  const genesisPrompt = await promptMultiline("Enter the genesis prompt (system prompt) for your automaton.");
+  const genesisPrompt = process.env.AUTOMATON_GENESIS_PROMPT || "You are a helpful autonomous AI agent operating 24/7.";
   console.log(chalk.green(`  Genesis prompt set (${genesisPrompt.length} chars)\n`));
 
   console.log(chalk.dim(`  Your automaton's address is ${walletAddress}`));
-  console.log(chalk.dim("  Now enter YOUR wallet address (the human creator/owner).\n"));
-  const creatorAddressLabel = walletChainType === "solana"
-    ? "Creator wallet address (base58)"
-    : "Creator wallet address (0x...)";
-  const creatorAddress = await promptAddress(creatorAddressLabel, walletChainType);
+  const creatorAddress = process.env.CREATOR_ADDRESS || walletAddress;
   console.log(chalk.green(`  Creator: ${creatorAddress}\n`));
 
-  console.log(chalk.white("  Optional: bring your own inference provider keys (press Enter to skip)."));
-  const openaiApiKey = await promptOptional("OpenAI API key (sk-..., optional)");
-  if (openaiApiKey && !openaiApiKey.startsWith("sk-")) {
-    console.log(chalk.yellow("  Warning: OpenAI keys usually start with sk-. Saving anyway."));
-  }
-
-  const anthropicApiKey = await promptOptional("Anthropic API key (sk-ant-..., optional)");
-  if (anthropicApiKey && !anthropicApiKey.startsWith("sk-ant-")) {
-    console.log(chalk.yellow("  Warning: Anthropic keys usually start with sk-ant-. Saving anyway."));
-  }
-
-  const ollamaInput = await promptOptional("Ollama base URL (http://localhost:11434, optional)");
-  const ollamaBaseUrl = ollamaInput || undefined;
-  if (ollamaBaseUrl) {
-    console.log(chalk.green(`  Ollama URL saved: ${ollamaBaseUrl}`));
-  }
+  const openaiApiKey = process.env.OPENAI_API_KEY || undefined;
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY || undefined;
+  const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || undefined;
 
   if (openaiApiKey || anthropicApiKey || ollamaBaseUrl) {
     const providers = [
@@ -127,28 +110,9 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
 
   // ─── Financial Safety Policy ─────────────────────────────────
   console.log(chalk.cyan("  Financial Safety Policy"));
-  console.log(chalk.dim("  These limits protect against unauthorized spending. Press Enter for defaults.\n"));
+  console.log(chalk.dim("  Using default safety limits.\n"));
 
-  const treasuryPolicy: TreasuryPolicy = {
-    maxSingleTransferCents: await promptWithDefault(
-      "Max single transfer (cents)", DEFAULT_TREASURY_POLICY.maxSingleTransferCents),
-    maxHourlyTransferCents: await promptWithDefault(
-      "Max hourly transfers (cents)", DEFAULT_TREASURY_POLICY.maxHourlyTransferCents),
-    maxDailyTransferCents: await promptWithDefault(
-      "Max daily transfers (cents)", DEFAULT_TREASURY_POLICY.maxDailyTransferCents),
-    minimumReserveCents: await promptWithDefault(
-      "Minimum reserve (cents)", DEFAULT_TREASURY_POLICY.minimumReserveCents),
-    maxX402PaymentCents: await promptWithDefault(
-      "Max x402 payment (cents)", DEFAULT_TREASURY_POLICY.maxX402PaymentCents),
-    x402AllowedDomains: DEFAULT_TREASURY_POLICY.x402AllowedDomains,
-    transferCooldownMs: DEFAULT_TREASURY_POLICY.transferCooldownMs,
-    maxTransfersPerTurn: DEFAULT_TREASURY_POLICY.maxTransfersPerTurn,
-    maxInferenceDailyCents: await promptWithDefault(
-      "Max daily inference spend (cents)", DEFAULT_TREASURY_POLICY.maxInferenceDailyCents),
-    requireConfirmationAboveCents: await promptWithDefault(
-      "Require confirmation above (cents)", DEFAULT_TREASURY_POLICY.requireConfirmationAboveCents),
-  };
-
+  const treasuryPolicy: TreasuryPolicy = DEFAULT_TREASURY_POLICY;
   console.log(chalk.green("  Treasury policy configured.\n"));
 
   // ─── 4. Detect environment ────────────────────────────────────
