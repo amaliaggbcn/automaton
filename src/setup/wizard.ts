@@ -61,7 +61,6 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
       console.log(chalk.yellow(`  Auto-provision failed: ${err.message}`));
       console.log(chalk.yellow("  Bypassing interactive prompt for headless deployment and using dummy fallback.\n"));
       
-      // Asignar clave simulada para evitar bloqueos por terminal cerrada en Railway
       apiKey = "cnwy_dummy_bypass_key";
       
       const configDir = getAutomatonDir();
@@ -173,3 +172,66 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     walletAddress,
     apiKey,
     openaiApiKey: openaiApiKey || undefined,
+    anthropicApiKey: anthropicApiKey || undefined,
+    ollamaBaseUrl,
+    treasuryPolicy,
+    chainType: walletChainType,
+  });
+
+  saveConfig(config);
+  console.log(chalk.green("  automaton.json written"));
+
+  writeDefaultHeartbeatConfig();
+  console.log(chalk.green("  heartbeat.yml written"));
+
+  const automatonDir = getAutomatonDir();
+  const constitutionSrc = path.join(process.cwd(), "constitution.md");
+  const constitutionDst = path.join(automatonDir, "constitution.md");
+  if (fs.existsSync(constitutionSrc)) {
+    fs.copyFileSync(constitutionSrc, constitutionDst);
+    fs.chmodSync(constitutionDst, 0o444);
+    console.log(chalk.green("  constitution.md installed (read-only)"));
+  }
+
+  const soulPath = path.join(automatonDir, "SOUL.md");
+  fs.writeFileSync(soulPath, generateSoulMd(name, walletAddress, creatorAddress, genesisPrompt), { mode: 0o600 });
+  console.log(chalk.green("  SOUL.md written"));
+
+  const skillsDir = config.skillsDir || "~/.automaton/skills";
+  installDefaultSkills(skillsDir);
+  console.log(chalk.green("  Default skills installed (conway-compute, conway-payments, survival)\n"));
+
+  // ─── 6. Funding guidance ──────────────────────────────────────
+  console.log(chalk.cyan("  [6/6] Funding\n"));
+  showFundingPanel(walletAddress, walletChainType);
+
+  closePrompts();
+
+  return config;
+}
+
+function showFundingPanel(address: string, chainType: ChainType = "evm"): void {
+  const short = `${address.slice(0, 6)}...${address.slice(-5)}`;
+  const usdcNetwork = chainType === "solana" ? "Solana" : "Base";
+  const w = 58;
+  const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - s.length));
+
+  console.log(chalk.cyan(`  ${"╭" + "─".repeat(w) + "╮"}`));
+  console.log(chalk.cyan(`  │${pad("  Fund your automaton", w)}│`));
+  console.log(chalk.cyan(`  │${" ".repeat(w)}│`));
+  console.log(chalk.cyan(`  │${pad(`  Address: ${short}`, w)}│`));
+  console.log(chalk.cyan(`  │${pad(`  Chain: ${chainType === "solana" ? "Solana" : "EVM (Base)"}`, w)}│`));
+  console.log(chalk.cyan(`  │${" ".repeat(w)}│`));
+  console.log(chalk.cyan(`  │${pad("  1. Transfer Conway credits", w)}│`));
+  console.log(chalk.cyan(`  │${pad("     conway credits transfer <address> <amount>", w)}│`));
+  console.log(chalk.cyan(`  │${" ".repeat(w)}│`));
+  console.log(chalk.cyan(`  │${pad(`  2. Send USDC on ${usdcNetwork} to the address above`, w)}│`));
+  console.log(chalk.cyan(`  │${" ".repeat(w)}│`));
+  console.log(chalk.cyan(`  │${pad("  3. Fund via Conway Cloud dashboard", w)}│`));
+  console.log(chalk.cyan(`  │${pad("     https://app.conway.tech", w)}│`));
+  console.log(chalk.cyan(`  │${" ".repeat(w)}│`));
+  console.log(chalk.cyan(`  │${pad("  The automaton will start now. Fund it anytime —", w)}│`));
+  console.log(chalk.cyan(`  │${pad("  the survival system handles zero-credit gracefully.", w)}│`));
+  console.log(chalk.cyan(`  ${"╰" + "─".repeat(w) + "╯"}`));
+  console.log("");
+}
