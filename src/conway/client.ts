@@ -120,4 +120,142 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
 
   // ─── Credits (mocked to avoid 401 from Conway) ───────────────
 
-  const getCredits
+  const getCreditsBalance = async (): Promise<number> => {
+    return 10000;
+  };
+
+  const getCreditsPricing = async (): Promise<PricingTier[]> => {
+    return [];
+  };
+
+  const transferCredits = async (
+    toAddress: string,
+    amountCents: number,
+  ): Promise<CreditTransferResult> => {
+    return {
+      transferId: "local-noop",
+      status: "disabled",
+      toAddress,
+      amountCents,
+    };
+  };
+
+  const registerAutomaton = async (params: {
+    automatonId: string;
+    automatonAddress: string;
+    creatorAddress: string;
+    name: string;
+    bio?: string;
+    genesisPromptHash?: `0x${string}`;
+    account: PrivateKeyAccount;
+    nonce?: string;
+    chainType?: ChainType;
+    chainIdentity?: ChainIdentity;
+  }): Promise<{ automaton: Record<string, unknown> }> => {
+    return {
+      automaton: {
+        automaton_id: params.automatonId,
+        automaton_address: params.automatonAddress,
+        creator_address: params.creatorAddress,
+        name: params.name,
+        bio: params.bio || "",
+        status: "local",
+      },
+    };
+  };
+
+  // ─── Domains (stubbed without Conway) ────────────────────────
+
+  const searchDomains = async (): Promise<DomainSearchResult[]> => {
+    return [];
+  };
+
+  const registerDomain = async (
+    domain: string,
+  ): Promise<DomainRegistration> => {
+    return {
+      domain,
+      status: "unavailable_without_conway",
+    };
+  };
+
+  const listDnsRecords = async (): Promise<DnsRecord[]> => {
+    return [];
+  };
+
+  const addDnsRecord = async (
+    _domain: string,
+    type: string,
+    host: string,
+    value: string,
+    ttl?: number,
+  ): Promise<DnsRecord> => {
+    return {
+      id: "local-noop",
+      type,
+      host,
+      value,
+      ttl: ttl || 3600,
+    };
+  };
+
+  const deleteDnsRecord = async (): Promise<void> => {
+    // No-op
+  };
+
+  // ─── Model Discovery ─────────────────────────────────────────
+
+  const listModels = async (): Promise<ModelInfo[]> => {
+    return [
+      {
+        id: "gpt-4o-mini",
+        provider: "openai",
+        pricing: {
+          inputPerMillion: 0.15,
+          outputPerMillion: 0.6,
+        },
+      },
+      {
+        id: "gpt-5-mini",
+        provider: "openai",
+        pricing: {
+          inputPerMillion: 0.25,
+          outputPerMillion: 2.0,
+        },
+      },
+    ];
+  };
+
+  const createScopedClient = (targetSandboxId: string): ConwayClient => {
+    return createConwayClient({ apiUrl, apiKey, sandboxId: targetSandboxId });
+  };
+
+  return {
+    exec,
+    writeFile,
+    readFile,
+    exposePort,
+    removePort,
+    createSandbox,
+    deleteSandbox,
+    listSandboxes,
+    getCreditsBalance,
+    getCreditsPricing,
+    transferCredits,
+    registerAutomaton,
+    searchDomains,
+    registerDomain,
+    listDnsRecords,
+    addDnsRecord,
+    deleteDnsRecord,
+    listModels,
+    createScopedClient,
+  };
+}
+
+function normalizeSandboxId(value: string | null | undefined): string {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "";
+  if (trimmed === "undefined" || trimmed === "null") return "";
+  return trimmed;
+}
