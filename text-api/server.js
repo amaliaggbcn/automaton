@@ -1,3 +1,6 @@
+rm -f text-api/server.cjs
+mkdir -p text-api
+cat << 'EOF' > text-api/server.cjs
 const http = require("http");
 const { URL } = require("url");
 
@@ -148,3 +151,9 @@ process.on("unhandledRejection", (reason) => {
 });
 
 startServer();
+EOF
+pkill -f "text-api/server.cjs" 2>/dev/null || true
+nohup /usr/bin/node text-api/server.cjs >/tmp/text-api.log 2>&1 &
+sleep 1
+cat /tmp/text-api.log
+/usr/bin/node -e "fetch('http://localhost:3001/health').then(r=>r.json()).then(console.log).catch(console.error)"
