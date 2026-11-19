@@ -73,8 +73,14 @@ export function createInferenceClient(
     retryableStatuses: [500, 502, 503, 504],
   });
 
+  const envModel = process.env.OPENAI_MODEL?.trim();
+  const forceEnvModel =
+    process.env.OPENAI_FORCE_MODEL?.trim().toLowerCase() === "true";
+  const stripTools =
+    process.env.OPENAI_STRIP_TOOLS?.trim().toLowerCase() === "true";
+
   const preferredModel =
-    process.env.OPENAI_MODEL?.trim() ||
+    envModel ||
     options.defaultModel ||
     (options.openaiApiKey ? "gpt-4o-mini" : "gpt-5.2");
 
@@ -85,12 +91,19 @@ export function createInferenceClient(
 
   let activeModel = preferredModel;
   let activeMaxTokens = Math.min(options.maxTokens || 2048, 2048);
+  let lowComputeEnabled = false;
 
   const chat = async (
     messages: ChatMessage[],
     opts?: InferenceOptions,
   ): Promise<InferenceResponse> => {
-    const model = opts?.model || activeModel;
+    // Si OPENAI_FORCE_MODEL=true y hay OPENAI_MODEL, o si lowComputeEnabled está activo,
+    // prioriza activeModel para evitar que el router fuerce gpt-5.2 en cada turno.
+    const model =
+      (forceEnvModel && envModel) || lowComputeEnabled
+        ? activeModel
+        : opts?.model || activeModel;
+
     const maxTokens = Math.min(opts?.maxTokens || activeMaxTokens, 2048);
     const backend = resolveInferenceBackend(model, {
       openaiApiKey: options.openaiApiKey,
@@ -121,7 +134,7 @@ export function createInferenceClient(
     if (opts?.temperature !== undefined) {
       payload.temperature = opts.temperature;
     }
-    if (opts?.tools && opts.tools.length > 0) {
+    if (!stripTools && opts?.tools && opts.tools.length > 0) {
       payload.tools = opts.tools;
       payload.tool_choice = "auto";
     }
@@ -183,6 +196,7 @@ export function createInferenceClient(
   };
 
   const setLowComputeMode = (enabled: boolean): void => {
+    lowComputeEnabled = enabled;
     if (enabled) {
       activeModel = lowComputeTarget;
       activeMaxTokens = 1500;
