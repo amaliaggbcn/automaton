@@ -18,11 +18,6 @@ import type { ChainType } from "./chain.js";
 import { EvmChainIdentity, SolanaChainIdentity } from "./chain.js";
 import type { ChainIdentity } from "./chain.js";
 
-/**
- * Create a stub PrivateKeyAccount for Solana wallets.
- * The stub has the Solana address but throws on any EVM signing attempt,
- * preventing accidental use of a random key.
- */
 function createSolanaStubAccount(solanaAddress: string): PrivateKeyAccount {
   const throwSigning = () => {
     throw new Error(
@@ -47,6 +42,17 @@ const AUTOMATON_DIR = path.join(
 );
 const WALLET_FILE = path.join(AUTOMATON_DIR, "wallet.json");
 
+function getEnvPrivateKey(): `0x${string}` | null {
+  const raw = (
+    process.env.WALLET_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY ||
+    ""
+  ).trim();
+  if (!raw) return null;
+  const normalized = raw.startsWith("0x") ? raw : `0x${raw}`;
+  return normalized as `0x${string}`;
+}
+
 export function getAutomatonDir(): string {
   return AUTOMATON_DIR;
 }
@@ -55,11 +61,11 @@ export function getWalletPath(): string {
   return WALLET_FILE;
 }
 
-/**
- * Generate a Solana Ed25519 keypair.
- * Returns the 64-byte secret key (first 32 = private, last 32 = public).
- */
-export function generateSolanaKeypair(): { secretKey: Uint8Array; publicKey: Uint8Array; address: string } {
+export function generateSolanaKeypair(): {
+  secretKey: Uint8Array;
+  publicKey: Uint8Array;
+  address: string;
+} {
   const keypair = nacl.sign.keyPair();
   return {
     secretKey: keypair.secretKey,
@@ -68,12 +74,6 @@ export function generateSolanaKeypair(): { secretKey: Uint8Array; publicKey: Uin
   };
 }
 
-/**
- * Get or create the automaton's wallet.
- * The private key IS the automaton's identity -- protect it.
- *
- * @param chainType - If creating a new wallet, which chain to use. Defaults to "evm".
- */
 export async function getWallet(chainType?: ChainType): Promise<{
   account: PrivateKeyAccount;
   chainIdentity: ChainIdentity;
@@ -84,6 +84,31 @@ export async function getWallet(chainType?: ChainType): Promise<{
     fs.mkdirSync(AUTOMATON_DIR, { recursive: true, mode: 0o700 });
   }
 
+  // 1. Priorizar clave privada fija por variable de entorno
+  const envKey = getEnvPrivateKey();
+  if (envKey) {
+    const account = privateKeyToAccount(envKey);
+    const walletData: WalletData = {
+      chainType: "evm",
+      privateKey: envKey,
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(WALLET_FILE, JSON.stringify(walletData, null, 2), {
+        mode: 0o600,
+      });
+    } catch {
+      // Si el sistema de archivos es de solo lectura, continuamos en memoria con la clave del entorno
+    }
+    return {
+      account,
+      chainIdentity: new EvmChainIdentity(account),
+      chainType: "evm",
+      isNew: false,
+    };
+  }
+
+  // 2. Si existe wallet.json en disco, cargarla
   if (fs.existsSync(WALLET_FILE)) {
     const walletData: WalletData = JSON.parse(
       fs.readFileSync(WALLET_FILE, "utf-8"),
@@ -94,15 +119,24 @@ export async function getWallet(chainType?: ChainType): Promise<{
       const secretKey = bs58.decode(walletData.secretKey);
       const solanaIdentity = new SolanaChainIdentity(secretKey);
       const account = createSolanaStubAccount(solanaIdentity.address);
-      return { account, chainIdentity: solanaIdentity, chainType: "solana", isNew: false };
+      return {
+        account,
+        chainIdentity: solanaIdentity,
+        chainType: "solana",
+        isNew: false,
+      };
     }
 
-    // EVM path (default)
     const account = privateKeyToAccount(walletData.privateKey!);
-    return { account, chainIdentity: new EvmChainIdentity(account), chainType: "evm", isNew: false };
+    return {
+      account,
+      chainIdentity: new EvmChainIdentity(account),
+      chainType: "evm",
+      isNew: false,
+    };
   }
 
-  // Create new wallet
+  // 3. Crear wallet nueva solo si no hay variable de entorno ni archivo previo
   const resolvedChain = chainType || "evm";
 
   if (resolvedChain === "solana") {
@@ -120,10 +154,14 @@ export async function getWallet(chainType?: ChainType): Promise<{
     });
 
     const account = createSolanaStubAccount(address);
-    return { account, chainIdentity: solanaIdentity, chainType: "solana", isNew: true };
+    return {
+      account,
+      chainIdentity: solanaIdentity,
+      chainType: "solana",
+      isNew: true,
+    };
   }
 
-  // EVM wallet
   const privateKey = generatePrivateKey();
   const account = privateKeyToAccount(privateKey);
 
@@ -137,13 +175,20 @@ export async function getWallet(chainType?: ChainType): Promise<{
     mode: 0o600,
   });
 
-  return { account, chainIdentity: new EvmChainIdentity(account), chainType: "evm", isNew: true };
+  return {
+    account,
+    chainIdentity: new EvmChainIdentity(account),
+    chainType: "evm",
+    isNew: true,
+  };
 }
 
-/**
- * Get the wallet address without loading the full account.
- */
 export function getWalletAddress(): string | null {
+  const envKey = getEnvPrivateKey();
+  if (envKey) {
+    return privateKeyToAccount(envKey).address;
+  }
+
   if (!fs.existsSync(WALLET_FILE)) {
     return null;
   }
@@ -162,11 +207,12 @@ export function getWalletAddress(): string | null {
   return account.address;
 }
 
-/**
- * Load the full wallet account (needed for signing).
- * For Solana wallets, returns a proxy account.
- */
 export function loadWalletAccount(): PrivateKeyAccount | null {
+  const envKey = getEnvPrivateKey();
+  if (envKey) {
+    return privateKeyToAccount(envKey);
+  }
+
   if (!fs.existsSync(WALLET_FILE)) {
     return null;
   }
@@ -176,17 +222,16 @@ export function loadWalletAccount(): PrivateKeyAccount | null {
   );
 
   if (walletData.chainType === "solana") {
-    // Solana wallets don't have a PrivateKeyAccount; callers should use getWallet() instead
     return null;
   }
 
   return privateKeyToAccount(walletData.privateKey!);
 }
 
-/**
- * Get the chain type from the wallet file.
- */
 export function getWalletChainType(): ChainType {
+  if (getEnvPrivateKey()) {
+    return "evm";
+  }
   if (!fs.existsSync(WALLET_FILE)) {
     return "evm";
   }
@@ -201,5 +246,5 @@ export function getWalletChainType(): ChainType {
 }
 
 export function walletExists(): boolean {
-  return fs.existsSync(WALLET_FILE);
+  return Boolean(getEnvPrivateKey()) || fs.existsSync(WALLET_FILE);
 }
