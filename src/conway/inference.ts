@@ -20,6 +20,20 @@ export interface InferenceClientOptions {
   getModelProvider?: (modelId: string) => string | undefined;
 }
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+function parseRetryAfterMs(errBody: string): number {
+  const match = errBody.match(/try again in\s+([\d.]+)\s*s/i);
+  if (match) {
+    const seconds = Number.parseFloat(match[1]);
+    if (!Number.isNaN(seconds) && seconds > 0) {
+      return Math.min(Math.ceil(seconds * 1000) + 500, 65_000);
+    }
+  }
+  return 12_000;
+}
+
 export function resolveInferenceBackend(
   model: string,
   keys: {
@@ -56,18 +70,28 @@ export function createInferenceClient(
 ): InferenceClient {
   const httpClient = new ResilientHttpClient({
     baseTimeout: 60_000,
-    retryableStatuses: [429, 500, 502, 503, 504],
+    retryableStatuses: [500, 502, 503, 504],
   });
 
-  let activeModel = options.defaultModel;
-  let activeMaxTokens = options.maxTokens;
+  const preferredModel =
+    process.env.OPENAI_MODEL?.trim() ||
+    options.defaultModel ||
+    (options.openaiApiKey ? "gpt-4o-mini" : "gpt-5.2");
+
+  const lowComputeTarget =
+    process.env.OPENAI_LOW_COMPUTE_MODEL?.trim() ||
+    options.lowComputeModel ||
+    "gpt-4o-mini";
+
+  let activeModel = preferredModel;
+  let activeMaxTokens = Math.min(options.maxTokens || 2048, 2048);
 
   const chat = async (
     messages: ChatMessage[],
     opts?: InferenceOptions,
   ): Promise<InferenceResponse> => {
     const model = opts?.model || activeModel;
-    const maxTokens = opts?.maxTokens || activeMaxTokens;
+    const maxTokens = Math.min(opts?.maxTokens || activeMaxTokens, 2048);
     const backend = resolveInferenceBackend(model, {
       openaiApiKey: options.openaiApiKey,
       anthropicApiKey: options.anthropicApiKey,
@@ -107,52 +131,64 @@ export function createInferenceClient(
         ? `Bearer ${backend === "openai" ? options.openaiApiKey : "ollama"}`
         : options.apiKey;
 
-    const res = await httpClient.request(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: authHeader || "",
-      },
-      body: JSON.stringify(payload),
-      timeout: 60_000,
-    });
+    const maxRateLimitRetries = 2;
+    let attempt = 0;
 
-    if (!res.ok) {
+    while (true) {
+      const res = await httpClient.request(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader || "",
+        },
+        body: JSON.stringify(payload),
+        timeout: 60_000,
+      });
+
+      if (res.ok) {
+        const json = (await res.json()) as any;
+        const choice = json.choices?.[0];
+        if (!choice?.message) {
+          throw new Error("Empty inference response");
+        }
+
+        return {
+          id: json.id || "",
+          model: json.model || model,
+          message: {
+            role: choice.message.role || "assistant",
+            content: choice.message.content || "",
+            tool_calls: choice.message.tool_calls,
+          },
+          toolCalls: choice.message.tool_calls,
+          usage: {
+            promptTokens: json.usage?.prompt_tokens || 0,
+            completionTokens: json.usage?.completion_tokens || 0,
+            totalTokens: json.usage?.total_tokens || 0,
+          },
+          finishReason: choice.finish_reason || "stop",
+        };
+      }
+
       const errBody = await res.text();
+      if (res.status === 429 && attempt < maxRateLimitRetries) {
+        attempt += 1;
+        const waitMs = parseRetryAfterMs(errBody);
+        await sleep(waitMs);
+        continue;
+      }
+
       throw new Error(`Inference request failed (${res.status}): ${errBody}`);
     }
-
-    const json = (await res.json()) as any;
-    const choice = json.choices?.[0];
-    if (!choice?.message) {
-      throw new Error("Empty inference response");
-    }
-
-    return {
-      id: json.id || "",
-      model: json.model || model,
-      message: {
-        role: choice.message.role || "assistant",
-        content: choice.message.content || "",
-        tool_calls: choice.message.tool_calls,
-      },
-      toolCalls: choice.message.tool_calls,
-      usage: {
-        promptTokens: json.usage?.prompt_tokens || 0,
-        completionTokens: json.usage?.completion_tokens || 0,
-        totalTokens: json.usage?.total_tokens || 0,
-      },
-      finishReason: choice.finish_reason || "stop",
-    };
   };
 
   const setLowComputeMode = (enabled: boolean): void => {
     if (enabled) {
-      activeModel = options.lowComputeModel || "gpt-5-mini";
-      activeMaxTokens = 4096;
+      activeModel = lowComputeTarget;
+      activeMaxTokens = 1500;
     } else {
-      activeModel = options.defaultModel;
-      activeMaxTokens = options.maxTokens;
+      activeModel = preferredModel;
+      activeMaxTokens = Math.min(options.maxTokens || 2048, 2048);
     }
   };
 
