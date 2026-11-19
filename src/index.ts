@@ -31,7 +31,7 @@ import { SpendTracker } from "./agent/spend-tracker.js";
 import { createDefaultRules } from "./agent/policy-rules/index.js";
 import type { AutomatonIdentity, AgentState, Skill, SocialClientInterface } from "./types.js";
 import { DEFAULT_TREASURY_POLICY } from "./types.js";
-import { createLogger, setGlobalLogLevel, StructuredLogger } from "./observability/logger.js";
+import { createLogger, StructuredLogger } from "./observability/logger.js";
 import { prettySink } from "./observability/pretty-sink.js";
 import { bootstrapTopup } from "./conway/topup.js";
 import { randomUUID } from "crypto";
@@ -69,13 +69,13 @@ Usage:
 Environment:
   CONWAY_API_URL           Conway API URL (default: https://api.conway.tech)
   CONWAY_API_KEY           Conway API key (overrides config)
+  OPENAI_API_KEY           OpenAI API key (overrides config)
   OLLAMA_BASE_URL          Ollama base URL (overrides config, e.g. http://localhost:11434)
 `);
     process.exit(0);
   }
 
   if (args.includes("--init")) {
-    // Read chain type from genesis.json if written by parent during spawn
     let initChainType: import("./identity/chain.js").ChainType | undefined;
     try {
       const genesisPath = path.join(getAutomatonDir(), "genesis.json");
@@ -135,7 +135,6 @@ Environment:
     return;
   }
 
-  // Default: show help
   logger.info('Run "automaton --help" for usage information.');
   logger.info('Run "automaton --run" to start the automaton.');
 }
@@ -186,34 +185,31 @@ Version:    ${config.version}
 async function run(): Promise<void> {
   logger.info(`[${new Date().toISOString()}] Conway Automaton v${VERSION} starting...`);
 
-  // Load config — first run triggers interactive setup wizard
   let config = loadConfig();
   if (!config) {
     const { runSetupWizard } = await import("./setup/wizard.js");
     config = await runSetupWizard();
   }
 
-  // Load wallet (chain-aware)
   const { account, chainIdentity, chainType: walletChainType } = await getWallet();
   const resolvedChainType = config.chainType || walletChainType || "evm";
-  const apiKey = config.conwayApiKey || loadApiKeyFromConfig();
-  if (!apiKey) {
-    logger.error("No API key found. Run: automaton --provision");
-    process.exit(1);
-  }
+  const openaiApiKey = process.env.OPENAI_API_KEY || config.openaiApiKey;
+  const anthropicApiKey = process.env.ANTHROPIC_API_KEY || config.anthropicApiKey;
+  const apiKey =
+    config.conwayApiKey ||
+    loadApiKeyFromConfig() ||
+    openaiApiKey ||
+    "local-mode";
 
-  // Initialize database
   const dbPath = resolvePath(config.dbPath);
   const db = createDatabase(dbPath);
 
-  // Persist createdAt: only set if not already stored (never overwrite)
   const existingCreatedAt = db.getIdentity("createdAt");
   const createdAt = existingCreatedAt || new Date().toISOString();
   if (!existingCreatedAt) {
     db.setIdentity("createdAt", createdAt);
   }
 
-  // Build identity (chain-aware)
   const identity: AutomatonIdentity = {
     name: config.name,
     address: chainIdentity.address,
@@ -226,7 +222,6 @@ async function run(): Promise<void> {
     chainIdentity,
   };
 
-  // Store identity in DB
   db.setIdentity("name", config.name);
   db.setIdentity("address", chainIdentity.address);
   db.setIdentity("creator", config.creatorAddress);
@@ -238,14 +233,12 @@ async function run(): Promise<void> {
     db.setIdentity("automatonId", automatonId);
   }
 
-  // Create Conway client
   const conway = createConwayClient({
     apiUrl: config.conwayApiUrl,
     apiKey,
     sandboxId: config.sandboxId,
   });
 
-  // Register automaton identity (one-time, immutable)
   const registrationState = db.getIdentity("conwayRegistrationStatus");
   if (registrationState !== "registered") {
     try {
@@ -277,11 +270,8 @@ async function run(): Promise<void> {
     }
   }
 
-  // Resolve Ollama base URL: env var takes precedence over config
   const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || config.ollamaBaseUrl;
 
-  // Create inference client — pass a live registry lookup so model names like
-  // "gpt-oss:120b" route to Ollama based on their registered provider, not heuristics.
   const modelRegistry = new ModelRegistry(db.raw);
   modelRegistry.initialize();
   const inference = createInferenceClient({
@@ -290,35 +280,31 @@ async function run(): Promise<void> {
     defaultModel: config.inferenceModel,
     maxTokens: config.maxTokensPerTurn,
     lowComputeModel: config.modelStrategy?.lowComputeModel || "gpt-5-mini",
-    openaiApiKey: config.openaiApiKey,
-    anthropicApiKey: config.anthropicApiKey,
+    openaiApiKey,
+    anthropicApiKey,
     ollamaBaseUrl,
-    getModelProvider: (modelId) => modelRegistry.get(modelId)?.provider,
+    getModelProvider: (modelId: string) => modelRegistry.get(modelId)?.provider,
   });
 
   if (ollamaBaseUrl) {
     logger.info(`[${new Date().toISOString()}] Ollama backend: ${ollamaBaseUrl}`);
   }
 
-  // Create social client (chain-aware: pass ChainIdentity for Solana signing)
   let social: SocialClientInterface | undefined;
   if (config.socialRelayUrl) {
     social = createSocialClient(config.socialRelayUrl, resolvedChainType === "solana" ? chainIdentity : account);
     logger.info(`[${new Date().toISOString()}] Social relay: ${config.socialRelayUrl}`);
   }
 
-  // Initialize PolicyEngine + SpendTracker (Phase 1.4)
   const treasuryPolicy = config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY;
   const rules = createDefaultRules(treasuryPolicy);
   const policyEngine = new PolicyEngine(db.raw, rules);
   const spendTracker = new SpendTracker(db.raw);
 
-  // Load and sync heartbeat config
   const heartbeatConfigPath = resolvePath(config.heartbeatConfigPath);
   const heartbeatConfig = loadHeartbeatConfig(heartbeatConfigPath);
   syncHeartbeatToDb(heartbeatConfig, db);
 
-  // Load skills
   const skillsDir = config.skillsDir || "~/.automaton/skills";
   let skills: Skill[] = [];
   try {
@@ -328,7 +314,6 @@ async function run(): Promise<void> {
     logger.warn(`[${new Date().toISOString()}] Skills loading failed: ${err.message}`);
   }
 
-  // Initialize state repo (git)
   try {
     await initStateRepo(conway);
     logger.info(`[${new Date().toISOString()}] State repo initialized.`);
@@ -336,8 +321,6 @@ async function run(): Promise<void> {
     logger.warn(`[${new Date().toISOString()}] State repo init failed: ${err.message}`);
   }
 
-  // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.
-  // The agent decides larger topups itself via the topup_credits tool.
   try {
     let bootstrapTimer: ReturnType<typeof setTimeout>;
     const bootstrapTimeout = new Promise<null>((_, reject) => {
@@ -368,7 +351,6 @@ async function run(): Promise<void> {
     logger.warn(`[${new Date().toISOString()}] Bootstrap topup skipped: ${err.message}`);
   }
 
-  // Start heartbeat daemon (Phase 1.1: DurableScheduler)
   const heartbeat = createHeartbeatDaemon({
     identity,
     config,
@@ -379,15 +361,13 @@ async function run(): Promise<void> {
     social,
     onWakeRequest: (reason) => {
       logger.info(`[HEARTBEAT] Wake request: ${reason}`);
-      // Phase 1.1: Use wake_events table instead of KV wake_request
-      insertWakeEvent(db.raw, 'heartbeat', reason);
+      insertWakeEvent(db.raw, "heartbeat", reason);
     },
   });
 
   heartbeat.start();
   logger.info(`[${new Date().toISOString()}] Heartbeat daemon started.`);
 
-  // Handle graceful shutdown
   const shutdown = () => {
     logger.info(`[${new Date().toISOString()}] Shutting down...`);
     heartbeat.stop();
@@ -399,20 +379,14 @@ async function run(): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  // ─── Main Run Loop ──────────────────────────────────────────
-  // The automaton alternates between running and sleeping.
-  // The heartbeat can wake it up.
-
   while (true) {
     try {
-      // Reload skills (may have changed since last loop)
       try {
         skills = loadSkills(skillsDir, db);
       } catch (error) {
         logger.error("Skills reload failed", error instanceof Error ? error : undefined);
       }
 
-      // Run the agent loop
       await runAgentLoop({
         identity,
         config,
@@ -434,14 +408,11 @@ async function run(): Promise<void> {
         },
       });
 
-      // Agent loop exited (sleeping or dead)
       const state = db.getAgentState();
 
       if (state === "dead") {
         logger.info(`[${new Date().toISOString()}] Automaton is dead. Heartbeat will continue.`);
-        // In dead state, we just wait for funding
-        // The heartbeat will keep checking and broadcasting distress
-        await sleep(300_000); // Check every 5 minutes
+        await sleep(300_000);
         continue;
       }
 
@@ -455,14 +426,12 @@ async function run(): Promise<void> {
           `[${new Date().toISOString()}] Sleeping for ${Math.round(sleepMs / 1000)}s`,
         );
 
-        // Sleep, but check for wake requests periodically
         const checkInterval = Math.min(sleepMs, 30_000);
         let slept = 0;
         while (slept < sleepMs) {
           await sleep(checkInterval);
           slept += checkInterval;
 
-          // Phase 1.1: Check for wake events from wake_events table (atomic consume)
           const wakeEvent = consumeNextWakeEvent(db.raw);
           if (wakeEvent) {
             logger.info(
@@ -473,7 +442,6 @@ async function run(): Promise<void> {
           }
         }
 
-        // Clear sleep state
         db.deleteKV("sleep_until");
         continue;
       }
@@ -481,7 +449,6 @@ async function run(): Promise<void> {
       logger.error(
         `[${new Date().toISOString()}] Fatal error in run loop: ${err.message}`,
       );
-      // Wait before retrying
       await sleep(30_000);
     }
   }
